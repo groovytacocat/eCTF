@@ -1,6 +1,8 @@
 # eCTF Insecure Example
 
-This repository holds the insecure example design for an eCTF Satellite TV System.
+This repository holds the insecure example design for an eCTF Satellite TV System. 
+
+***This is my personal fork of the MITRE Cyber Academy 2025 Insecure Reference Design per Organizer direction***
 
 ## Layout
 
