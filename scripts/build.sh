@@ -1,6 +1,6 @@
 #!/bin/bash
 
-WORK_DIR="$(find ~/ -type d -name "2025-ectf" 2> /dev/null)"
+WORK_DIR="$(find ~/ -type d -name "eCTF" 2> /dev/null)"
 
 main(){
 	echo -e "Checking for correct project directory\n"
