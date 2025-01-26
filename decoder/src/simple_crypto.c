@@ -13,7 +13,9 @@
 
 #if CRYPTO_EXAMPLE
 
+#include<wolfssl/wolfcrypt/settings.h>
 #include "simple_crypto.h"
+#include "host_messaging.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -87,6 +89,19 @@ int decrypt_sym(uint8_t *ciphertext, size_t len, uint8_t *key, uint8_t *plaintex
         if (result != 0)
             return result; // Report error
     }
+/*
+    // Remove padding
+    size_t padding = 0;
+    for(int i = len - 1; i >= 0; i--){
+        if(plaintext[i] == PADDING_CHAR){
+            padding++;
+        }
+        else
+            break;
+    }
+
+    *plaintext_length = len - padding;
+*/    
     return 0;
 }
 
@@ -102,7 +117,17 @@ int decrypt_sym(uint8_t *ciphertext, size_t len, uint8_t *key, uint8_t *plaintex
  */
 int hash(void *data, size_t len, uint8_t *hash_out) {
     // Pass values to hash
-    return wc_Md5Hash((uint8_t *)data, len, hash_out);
+    return wc_Sha256Hash((uint8_t *)data, len, hash_out);
 }
 
+
+unsigned int custom_rand_generate_block(byte* data, word32 len){
+    int ret = MXC_TRNG_Random(data, len);
+    
+    return ret == 0 ? 0 : ret;
+}
+
+unsigned int rand_gen(void){
+    return MXC_TRNG_RandomInt();
+}
 #endif
