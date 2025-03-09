@@ -175,7 +175,7 @@ int write_packet(msg_type_t type, const void *buf, uint16_t len) {
  * 
  *  @return 0 on success, a negative number on failure
 */
-int read_packet(msg_type_t* cmd, void *buf, uint16_t *len) {
+int read_packet(msg_type_t* cmd, void *buf, uint16_t *len, uint16_t *buf_size) {
     msg_header_t header = {0};
 
     // cmd must be a valid pointer
@@ -189,6 +189,16 @@ int read_packet(msg_type_t* cmd, void *buf, uint16_t *len) {
 
     if (len != NULL) {
         *len = header.len;
+    }
+
+    // Prevents buffer overflow
+    if(*len > *buf_size)
+    {
+        if(write_ack() < 0){
+            return -999;
+        }
+
+        return -555;
     }
 
     if (header.cmd != ACK_MSG) {

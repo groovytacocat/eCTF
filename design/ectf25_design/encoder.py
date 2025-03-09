@@ -13,7 +13,10 @@ Copyright: Copyright (c) 2025 The MITRE Corporation
 import argparse
 import struct
 import json
-
+from Crypto.Cipher import AES
+from Crypto.Hash import HMAC, SHA256
+from Crypto.Protocol.KDF import HKDF
+from Crypto.Random import get_random_bytes
 
 class Encoder:
     def __init__(self, secrets: bytes):
@@ -31,7 +34,16 @@ class Encoder:
 
         # Load the example secrets for use in Encoder.encode
         # This will be "EXAMPLE" in the reference design"
-        self.some_secrets = secrets["some_secrets"]
+        self.root_key = bytes.fromhex(secrets["ROOT"])
+        self.nonce = bytes.fromhex(secrets["NONCE"])
+        self.init_salt = bytes.fromhex(secrets["SALT"])
+        self.sym_key = None 
+        self.mac_key = None
+        self.counter = 0
+        self.KDF_Gen(self.init_salt)
+
+    def KDF_Gen(self, salt: bytes):
+        self.sym_key, self.mac_key = HKDF(self.root_key, 32, salt, SHA256, 2)
 
     def encode(self, channel: int, frame: bytes, timestamp: int) -> bytes:
         """The frame encoder function
@@ -41,7 +53,7 @@ class Encoder:
 
         You **may not** change the arguments or returns of this function!
 
-        :param channel: 16b unsigned channel number. Channel 0 is the emergency
+        :param channel: 32b unsigned channel number. Channel 0 is the emergency
             broadcast that must be decodable by all channels.
         :param frame: Frame to encode. Max frame size is 64 bytes.
         :param timestamp: 64b timestamp to use for encoding. **NOTE**: This value may
@@ -53,9 +65,30 @@ class Encoder:
         """
         # TODO: encode the satellite frames so that they meet functional and
         #  security requirements
+        if self.counter % 200 == 0 and self.counter != 0:
+            counter_pack = struct.pack("<I", self.counter)
+            counter_pad = 32 - len(counter_pack)
+            counter_pack += bytes(counter_pad)
+            self.KDF_Gen(counter_pack)
 
+        key = self.sym_key
+        mac = self.mac_key
+        cipher = AES.new(key, AES.MODE_CBC, self.nonce)
+
+        frame_pad = 64 - len(frame)
+
+        frame += bytes(frame_pad)
+
+        frame = cipher.encrypt(frame)
+
+        h = HMAC.new(mac, digestmod=SHA256)
+
+        h.update(frame)
+        val = h.digest()
+
+        frame += val
+        self.counter = (timestamp // 200) % 1000
         return struct.pack("<IQ", channel, timestamp) + frame
-
 
 def main():
     """A test main to one-shot encode a frame

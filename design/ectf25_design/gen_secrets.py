@@ -12,8 +12,9 @@ Copyright: Copyright (c) 2025 The MITRE Corporation
 
 import argparse
 import json
+import random
 from pathlib import Path
-
+from Crypto.Random import get_random_bytes
 from loguru import logger
 
 
@@ -35,16 +36,19 @@ def gen_secrets(channels: list[int]) -> bytes:
     # Create the secrets object
     # You can change this to generate any secret material
     # The secrets file will never be shared with attackers
+    nonce = get_random_bytes(16)
+    root = get_random_bytes(32)
+    salt = get_random_bytes(32)
     secrets = {
         "channels": channels,
-        "some_secrets": "EXAMPLE",
+        "NONCE": nonce.hex(),
+        "ROOT" : root.hex(),
+        "SALT" : salt.hex()
     }
-
     # NOTE: if you choose to use JSON for your file type, you will not be able to
     # store binary data, and must either use a different file type or encode the
     # binary data to hex, base64, or another type of ASCII-only encoding
     return json.dumps(secrets).encode()
-
 
 def parse_args():
     """Define and parse the command line arguments

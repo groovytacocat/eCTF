@@ -18,25 +18,21 @@
 override BOARD=FTHR_RevA
 MFLOAT_ABI=soft
 
-IPATH+=../deployment
 IPATH+=inc/
-IPATH+=/secrets
 VPATH+=src/
 
+generate-header:
+	python3 convert_json_to_header.py
+
+release: generate-header
+	$(MAKE) all
+	rm /decoder/inc/global_secrets.h
+
+PROJ_CFLAGS+="-DWOLFSSL_USER_SETTINGS"
+PROJ_CFLAGS+="-DWC_NO_HARDEN"
+PROJ_CFLAGS+="-DHAVE_HKDF"
 # ****************** eCTF Bootloader *******************
 # DO NOT REMOVE
 LINKERFILE=firmware.ld
 STARTUPFILE=startup_firmware.S
 ENTRY=firmware_startup
-
-# ****************** eCTF Crypto Example *******************
-# Uncomment the commented lines below and comment the disable
-# lines to enable the eCTF Crypto Example.
-# WolfSSL must be included in this directory as wolfssl/
-# WolfSSL can be downloaded from: https://www.wolfssl.com/download/
-
-# Disable Crypto Example
-#CRYPTO_EXAMPLE=0
-
-# Enable Crypto Example
-CRYPTO_EXAMPLE=1

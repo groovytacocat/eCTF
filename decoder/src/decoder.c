@@ -21,21 +21,9 @@
 #include "mxc_delay.h"
 #include "simple_flash.h"
 #include "host_messaging.h"
-
-#include "simple_uart.h"
-
-/* Code between this #ifdef and the subsequent #endif will
-*  be ignored by the compiler if CRYPTO_EXAMPLE is not set in
-*  the projectk.mk file. */
-#ifdef CRYPTO_EXAMPLE
-/* The simple crypto example included with the reference design is intended
-*  to be an example of how you *may* use cryptography in your design. You
-*  are not limited nor required to use this interface in your design. It is
-*  recommended for newer teams to start by only using the simple crypto
-*  library until they have a working design. */
 #include "simple_crypto.h"
-#endif  //CRYPTO_EXAMPLE
-
+#include "simple_uart.h"
+#include "global_secrets.h"
 /**********************************************************
  ******************* PRIMITIVE TYPES **********************
  **********************************************************/
@@ -55,7 +43,7 @@
 #define DEFAULT_CHANNEL_TIMESTAMP 0xFFFFFFFFFFFFFFFF
 // This is a canary value so we can confirm whether this decoder has booted before
 #define FLASH_FIRST_BOOT 0xDEADBEEF
-
+#define PADDING_CHAR '\0'
 /**********************************************************
  ********************* STATE MACROS ***********************
  **********************************************************/
@@ -116,6 +104,8 @@ typedef struct {
 /**********************************************************
  ************************ GLOBALS *************************
  **********************************************************/
+uint8_t SYMMETRIC_KEY[32] = {0};
+uint8_t MAC_KEY[32] = {0};
 
 // This is used to track decoder subscriptions
 flash_entry_t decoder_status;
@@ -125,14 +115,15 @@ flash_entry_t decoder_status;
  *  @param channel The channel number to be checked.
  *  @return 1 if the the decoder is subscribed to the channel.  0 if not.
 */
-int is_subscribed(channel_id_t channel) {
+int is_subscribed(channel_id_t channel, timestamp_t timestamp) {
     // Check if this is an emergency broadcast message
     if (channel == EMERGENCY_CHANNEL) {
         return 1;
     }
+
     // Check if the decoder has has a subscription
     for (int i = 0; i < MAX_CHANNEL_COUNT; i++) {
-        if (decoder_status.subscribed_channels[i].id == channel && decoder_status.subscribed_channels[i].active) {
+        if (decoder_status.subscribed_channels[i].id == channel && decoder_status.subscribed_channels[i].active && timestamp >= decoder_status.subscribed_channels[i].start_timestamp && timestamp <= decoder_status.subscribed_channels[i].end_timestamp) {
             return 1;
         }
     }
@@ -183,6 +174,13 @@ int list_channels() {
 */
 int update_subscription(pkt_len_t pkt_len, subscription_update_packet_t *update) {
     int i;
+    
+    // Check that the subscription to be loaded is provisioned for the appropriate DECODER_ID
+    if(update->decoder_id != DECODER_ID){
+        STATUS_LED_RED();
+        print_error("Failed to update subscription - invalid Decoder ID\n");
+        return -1;
+    }
 
     if (update->channel == EMERGENCY_CHANNEL) {
         STATUS_LED_RED();
@@ -222,25 +220,72 @@ int update_subscription(pkt_len_t pkt_len, subscription_update_packet_t *update)
  *
  *  @return 0 if successful.  -1 if data is from unsubscribed channel.
 */
-int decode(pkt_len_t pkt_len, frame_packet_t *new_frame) {
+int decode(pkt_len_t pkt_len, frame_packet_t *new_frame, timestamp_t *prior_time) {
     char output_buf[128] = {0};
-    uint16_t frame_size;
     channel_id_t channel;
 
     // Frame size is the size of the packet minus the size of non-frame elements
-    frame_size = pkt_len - (sizeof(new_frame->channel) + sizeof(new_frame->timestamp));
     channel = new_frame->channel;
 
-    // The reference design doesn't use the timestamp, but you may want to in your design
-    // timestamp_t timestamp = new_frame->timestamp;
+    //Get current timestamp. If it is strictly monotonically increasing continue, otherwise error
+    timestamp_t timestamp = new_frame->timestamp;
+
+    if(timestamp <= *prior_time){
+        STATUS_LED_RED();
+        sprintf(output_buf, "Current: %lu || Last: %lu\n", timestamp, prior_time);
+        print_error(output_buf);
+        return -1;
+    }
 
     // Check that we are subscribed to the channel...
     print_debug("Checking subscription\n");
-    if (is_subscribed(channel)) {
+    if (is_subscribed(channel, timestamp)) {
         print_debug("Subscription Valid\n");
-        /* The reference design doesn't need any extra work to decode, but your design likely will.
-        *  Do any extra decoding here before returning the result to the host. */
-        write_packet(DECODE_MSG, new_frame->data, frame_size);
+        
+        uint8_t* decrypted = (uint8_t *)malloc(FRAME_SIZE * sizeof(FRAME_SIZE));
+        uint8_t* pre_auth = (uint8_t *)malloc(FRAME_SIZE * sizeof(FRAME_SIZE));
+
+        uint8_t mac_tag[SHA256_DIGEST_SIZE] = {0};
+        size_t unpad_size;
+        
+        // Separate Encrypted frame from HMAC Tag
+        memcpy(pre_auth, new_frame->data, 64);
+
+        memcpy(mac_tag, new_frame->data + 64, 32);
+
+        // Verify HMAC TAG
+        int auth_res = verify_hmac(MAC_KEY, pre_auth, mac_tag);
+        if(auth_res < 0){
+            sprintf(output_buf, "HMAC FAILED %d\n", auth_res);
+            print_error(output_buf);
+            return -1;
+        }
+        
+        // Decrypt if valid
+        int res = decrypt_sym(pre_auth, FRAME_SIZE, SYMMETRIC_KEY, decrypted, &unpad_size);
+
+        if(res < 0){
+            sprintf(output_buf, "DECRYPTION FAILED: %d\n", res);
+            print_error(output_buf);
+            STATUS_LED_RED();
+            return -1;
+        }
+
+        // Zero out and free malloc'd memory
+        bzero(pre_auth, FRAME_SIZE);
+        free(pre_auth);
+
+        // Copy decrypted data back over to frame
+        memcpy(new_frame->data, decrypted, unpad_size);
+
+        // Zero out and free malloc'd memory
+        bzero(decrypted, FRAME_SIZE);
+        free(decrypted);
+        
+        // Update time for valid timestamp and good channel subscription
+        *prior_time = timestamp;
+
+        write_packet(DECODE_MSG, new_frame->data, unpad_size);
         return 0;
     } else {
         STATUS_LED_RED();
@@ -293,46 +338,14 @@ void init() {
         // if uart fails to initialize, do not continue to execute
         while (1);
     }
+
+    // Derive Initial Keys for Symmetric Encryption and HMAC
+    if(KDF_Gen(SALT, 32, SYMMETRIC_KEY, MAC_KEY) < 0){
+        STATUS_LED_ERROR();
+        print_error("INITIAL KDF FAILED\n");
+    }
+
 }
-
-/* Code between this #ifdef and the subsequent #endif will
-*  be ignored by the compiler if CRYPTO_EXAMPLE is not set in
-*  the projectk.mk file. */
-#ifdef CRYPTO_EXAMPLE
-void crypto_example(void) {
-    // Example of how to utilize included simple_crypto.h
-
-    // This string is 16 bytes long including null terminator
-    // This is the block size of included symmetric encryption
-    char *data = "Crypto Example!";
-    uint8_t ciphertext[BLOCK_SIZE];
-    uint8_t key[KEY_SIZE];
-    uint8_t hash_out[HASH_SIZE];
-    uint8_t decrypted[BLOCK_SIZE];
-
-    char output_buf[128] = {0};
-
-    // Zero out the key
-    bzero(key, BLOCK_SIZE);
-
-    // Encrypt example data and print out
-    encrypt_sym((uint8_t*)data, BLOCK_SIZE, key, ciphertext);
-    print_debug("Encrypted data: \n");
-    print_hex_debug(ciphertext, BLOCK_SIZE);
-
-    // Hash example encryption results
-    hash(ciphertext, BLOCK_SIZE, hash_out);
-
-    // Output hash result
-    print_debug("Hash result: \n");
-    print_hex_debug(hash_out, HASH_SIZE);
-
-    // Decrypt the encrypted message and print out
-    decrypt_sym(ciphertext, BLOCK_SIZE, key, decrypted);
-    sprintf(output_buf, "Decrypted message: %s\n", decrypted);
-    print_debug(output_buf);
-}
-#endif  //CRYPTO_EXAMPLE
 
 /**********************************************************
  *********************** MAIN LOOP ************************
@@ -343,23 +356,35 @@ int main(void) {
     uint8_t uart_buf[100];
     msg_type_t cmd;
     int result;
+    uint64_t counter = 0; // Counter for KDF 
     uint16_t pkt_len;
+    uint16_t buf_size = 128;
+    timestamp_t *last_time = (timestamp_t *)malloc(sizeof(timestamp_t)); // Timestamp guard variable
+
+    if(last_time == NULL){
+        print_error("Failed to malloc\n");
+        return -1;
+    }
+
+    *last_time = 0;
 
     // initialize the device
     init();
 
-    print_debug("Decoder Booted!\n");
-
     // process commands forever
     while (1) {
         print_debug("Ready\n");
-
+        
         STATUS_LED_GREEN();
 
-        result = read_packet(&cmd, uart_buf, &pkt_len);
+        result = read_packet(&cmd, uart_buf, &pkt_len, &buf_size);
 
         if (result < 0) {
             STATUS_LED_ERROR();
+            if(result == -999 || result == -555){
+                uart_flush();
+                print_error("Buffer overflow detected\n");
+            }
             print_error("Failed to receive cmd from host\n");
             continue;
         }
@@ -370,20 +395,31 @@ int main(void) {
         // Handle list command
         case LIST_MSG:
             STATUS_LED_CYAN();
-
-            #ifdef CRYPTO_EXAMPLE
-                // Run the crypto example
-                // TODO: Remove this from your design
-                crypto_example();
-            #endif // CRYPTO_EXAMPLE
-
             list_channels();
             break;
 
         // Handle decode command
         case DECODE_MSG:
             STATUS_LED_PURPLE();
-            decode(pkt_len, (frame_packet_t *)uart_buf);
+
+            frame_packet_t *in_frame = (frame_packet_t *)uart_buf;
+            timestamp_t time = in_frame->timestamp;
+
+            counter = (time / 200) % 1000;
+            decode(pkt_len, in_frame, last_time);
+            // Generate new keys using a salt value that will be shared between both encoder and decoder
+            if(counter % 200 == 0 && counter != 0){
+                uint8_t salt_bytes[32];
+                memcpy(salt_bytes, &counter, sizeof(counter));
+                memset(salt_bytes + sizeof(counter), 0, (32 - sizeof(counter)));
+                int key_gen = KDF_Gen(salt_bytes, 32, SYMMETRIC_KEY, MAC_KEY);
+                if(key_gen < 0){
+                    STATUS_LED_RED();
+                    sprintf(output_buf, "KDF Failed: %d\n", key_gen);
+                    print_error(output_buf);
+                }
+                bzero(salt_bytes, 32);
+            }
             break;
 
         // Handle subscribe command
@@ -400,4 +436,6 @@ int main(void) {
             break;
         }
     }
+
+    free(last_time);
 }

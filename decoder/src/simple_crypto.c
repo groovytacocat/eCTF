@@ -11,52 +11,20 @@
  * @copyright Copyright (c) 2025 The MITRE Corporation
  */
 
-#if CRYPTO_EXAMPLE
-
-#include<wolfssl/wolfcrypt/settings.h>
+#include "wolfssl/wolfcrypt/settings.h"
 #include "simple_crypto.h"
 #include "host_messaging.h"
+#include "wolfssl/wolfcrypt/hmac.h"
+#include "global_secrets.h"
 #include <stdint.h>
 #include <string.h>
 
-
+#define PADDING_CHAR '\0'
+#define MAC_KEY_LEN 32
+#define MAC_TAG_LEN 32
+#define ROOT_KEY_LEN 32
+#define MAC_BUF_LEN 64
 /******************************** FUNCTION PROTOTYPES ********************************/
-/** @brief Encrypts plaintext using a symmetric cipher
- *
- * @param plaintext A pointer to a buffer of length len containing the
- *          plaintext to encrypt
- * @param len The length of the plaintext to encrypt. Must be a multiple of
- *          BLOCK_SIZE (16 bytes)
- * @param key A pointer to a buffer of length KEY_SIZE (16 bytes) containing
- *          the key to use for encryption
- * @param ciphertext A pointer to a buffer of length len where the resulting
- *          ciphertext will be written to
- *
- * @return 0 on success, -1 on bad length, other non-zero for other error
- */
-int encrypt_sym(uint8_t *plaintext, size_t len, uint8_t *key, uint8_t *ciphertext) {
-    Aes ctx; // Context for encryption
-    int result; // Library result
-
-    // Ensure valid length
-    if (len <= 0 || len % BLOCK_SIZE)
-        return -1;
-
-    // Set the key for encryption
-    result = wc_AesSetKey(&ctx, key, 16, NULL, AES_ENCRYPTION);
-    if (result != 0)
-        return result; // Report error
-
-
-    // Encrypt each block
-    for (int i = 0; i < len - 1; i += BLOCK_SIZE) {
-        result = wc_AesEncryptDirect(&ctx, ciphertext + i, plaintext + i);
-        if (result != 0)
-            return result; // Report error
-    }
-    return 0;
-}
-
 /** @brief Decrypts ciphertext using a symmetric cipher
  *
  * @param ciphertext A pointer to a buffer of length len containing the
@@ -70,7 +38,7 @@ int encrypt_sym(uint8_t *plaintext, size_t len, uint8_t *key, uint8_t *ciphertex
  *
  * @return 0 on success, -1 on bad length, other non-zero for other error
  */
-int decrypt_sym(uint8_t *ciphertext, size_t len, uint8_t *key, uint8_t *plaintext) {
+int decrypt_sym(uint8_t *ciphertext, size_t len, uint8_t *key, uint8_t *plaintext, size_t *plaintext_len) {
     Aes ctx; // Context for decryption
     int result; // Library result
 
@@ -78,30 +46,65 @@ int decrypt_sym(uint8_t *ciphertext, size_t len, uint8_t *key, uint8_t *plaintex
     if (len <= 0 || len % BLOCK_SIZE)
         return -1;
 
+    // NONCE -> NULL if fail
     // Set the key for decryption
-    result = wc_AesSetKey(&ctx, key, 16, NULL, AES_DECRYPTION);
+    result = wc_AesSetKey(&ctx, key, 32, NONCE, AES_DECRYPTION);
     if (result != 0)
         return result; // Report error
-
-    // Decrypt each block
-    for (int i = 0; i < len - 1; i += BLOCK_SIZE) {
-        result = wc_AesDecryptDirect(&ctx, plaintext + i, ciphertext + i);
-        if (result != 0)
-            return result; // Report error
+    
+    int decrypt_result = wc_AesCbcDecrypt(&ctx, plaintext, ciphertext, len);
+    if(decrypt_result != 0){
+        return decrypt_result;
     }
-/*
-    // Remove padding
+
     size_t padding = 0;
-    for(int i = len - 1; i >= 0; i--){
+
+    for(size_t i = len - 1; i >= 0; i--){
         if(plaintext[i] == PADDING_CHAR){
             padding++;
         }
-        else
+        else{
             break;
+        }
     }
 
-    *plaintext_length = len - padding;
-*/    
+    *plaintext_len = len - padding;
+    
+    return 0;
+}
+
+/** @brief Generates HMAC on a given buffer and authenticates with a given HMAC tag
+ *
+ * @param key       A pointer to a buffer containing the key/secret for generating the HMAC
+ * @param buffer    A pointer to a buffer containing the message to be autheneticated
+ * @param tag       A pointer to a buffer containing the pre-calculated HMAC tag to compare to for authentication
+ *
+ * @return 0 on success, non-zero for other error
+ */
+int verify_hmac(uint8_t* key, uint8_t* buffer, uint8_t* tag){
+    Hmac hmac;
+    uint8_t digest[SHA256_DIGEST_SIZE] = {0};
+    
+    int key_res = wc_HmacSetKey(&hmac, SHA256, key, MAC_KEY_LEN);
+    if(key_res < 0){
+        return -111;
+    }
+    
+    int update_res = wc_HmacUpdate(&hmac, buffer, MAC_BUF_LEN);
+    if(update_res < 0){
+        return -222;
+    }
+    
+    int final_res = wc_HmacFinal(&hmac, digest);
+    if(final_res < 0){
+        return -333;
+    }
+
+    int auth = memcmp(digest, tag, MAC_TAG_LEN);
+    if(auth != 0){
+        return -444;
+    }
+
     return 0;
 }
 
@@ -121,6 +124,24 @@ int hash(void *data, size_t len, uint8_t *hash_out) {
 }
 
 
+int KDF_Gen(const uint8_t* salt, size_t salt_len, uint8_t* sym_key, uint8_t* mac_key){
+    uint8_t* master = (uint8_t*)malloc(64 * sizeof(uint8_t));
+    int res = wc_HKDF(WC_SHA256, ROOT_KEY, 32, salt, salt_len, NULL, 0, master, 64);
+
+    memmove(sym_key, master, 32);
+    memmove(mac_key, master + 32, 32);
+
+    if(res < 0){
+        return -555;
+    }
+
+    free(master);
+
+    return 0;
+}
+
+
+
 unsigned int custom_rand_generate_block(byte* data, word32 len){
     int ret = MXC_TRNG_Random(data, len);
     
@@ -130,4 +151,3 @@ unsigned int custom_rand_generate_block(byte* data, word32 len){
 unsigned int rand_gen(void){
     return MXC_TRNG_RandomInt();
 }
-#endif

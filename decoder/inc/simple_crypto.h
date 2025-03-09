@@ -11,11 +11,10 @@
  * @copyright Copyright (c) 2025 The MITRE Corporation
  */
 
-#if CRYPTO_EXAMPLE
 #ifndef ECTF_CRYPTO_H
 #define ECTF_CRYPTO_H
 
-#include<wolfssl/wolfcrypt/settings.h>
+//#include "wolfssl/wolfcrypt/settings.h"
 #include "wolfssl/wolfcrypt/aes.h"
 #include "wolfssl/wolfcrypt/random.h"
 #include "wolfssl/wolfcrypt/ecc.h"
@@ -58,8 +57,18 @@ int encrypt_sym(uint8_t *plaintext, size_t len, uint8_t *key, uint8_t *ciphertex
  *
  * @return 0 on success, -1 on bad length, other non-zero for other error
  */
-int decrypt_sym(uint8_t *ciphertext, size_t len, uint8_t *key, uint8_t *plaintext);
+int decrypt_sym(uint8_t *ciphertext, size_t len, uint8_t *key, uint8_t *plaintext, size_t *plaintext_len);
 
+
+/** @brief Generates HMAC on a given buffer and authenticates with a given HMAC tag
+ *
+ * @param key       A pointer to a buffer containing the key/secret for generating the HMAC
+ * @param buffer    A pointer to a buffer containing the message to be autheneticated
+ * @param tag       A pointer to a buffer containing the pre-calculated HMAC tag to compare to for authentication
+ *
+ * @return 0 on success, non-zero for other error
+ */
+int verify_hmac(uint8_t* key, uint8_t* buffer, uint8_t* tag);
 /** @brief Hashes arbitrary-length data
  *
  * @param data A pointer to a buffer of length len containing the data
@@ -72,7 +81,5 @@ int decrypt_sym(uint8_t *ciphertext, size_t len, uint8_t *key, uint8_t *plaintex
  */
 int hash(void *data, size_t len, uint8_t *hash_out);
 
-
-
-#endif // CRYPTO_EXAMPLE
+int KDF_Gen(const uint8_t* salt, size_t salt_len, uint8_t* sym_key, uint8_t* mac_key);
 #endif // ECTF_CRYPTO_H
